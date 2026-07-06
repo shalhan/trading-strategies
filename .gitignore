@@ -1,0 +1,15 @@
+# Cached historical klines and any recorded market data — large, regenerated,
+# never committed.
+/data/
+
+# Backtest output (trade logs, results).
+/out/
+
+# Secrets — API keys are supplied via env vars only (CLAUDE.md).
+.env
+*.env
+
+# Go build output
+/bin/
+*.test
+*.out

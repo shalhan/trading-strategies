@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>structure viz — SMC engine verifier</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  :root { --bg:#0e1117; --panel:#161b24; --border:#252c3a; --text:#d5dbe5; --dim:#7d8797;
+          --green:#26a69a; --red:#ef5350; --blue:#4d8bf5; --orange:#f5a623; --purple:#b57af5; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:13px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; flex-wrap:wrap; gap:10px; align-items:center;
+           padding:10px 14px; background:var(--panel); border-bottom:1px solid var(--border); }
+  header .group { display:flex; gap:6px; align-items:center; }
+  label { color:var(--dim); }
+  input, select { background:var(--bg); color:var(--text); border:1px solid var(--border);
+                  border-radius:6px; padding:5px 8px; font:inherit; }
+  input[type=text] { width:110px; text-transform:uppercase; }
+  input.num { width:56px; }
+  .tfbtn { padding:5px 11px; border:1px solid var(--border); border-radius:6px; background:var(--bg);
+           color:var(--dim); cursor:pointer; font:inherit; }
+  .tfbtn.active { background:var(--blue); border-color:var(--blue); color:#fff; }
+  #start { padding:6px 20px; border:0; border-radius:6px; background:var(--green); color:#04211e;
+           font-weight:700; cursor:pointer; font:inherit; }
+  #start:disabled { opacity:.5; cursor:wait; }
+  .toggles { display:flex; gap:12px; padding:7px 14px; background:var(--panel);
+             border-bottom:1px solid var(--border); flex-wrap:wrap; align-items:center; }
+  .toggles label { display:flex; gap:4px; align-items:center; cursor:pointer; color:var(--text); }
+  #status { color:var(--dim); margin-left:auto; }
+  #summary { display:flex; gap:18px; padding:7px 14px; background:var(--panel);
+             border-bottom:1px solid var(--border); flex-wrap:wrap; }
+  #summary b { color:var(--text); } #summary span { color:var(--dim); }
+  #chart { height:60vh; }
+  #trades { max-height:26vh; overflow:auto; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { padding:4px 10px; text-align:right; border-bottom:1px solid var(--border); white-space:nowrap; }
+  th { position:sticky; top:0; background:var(--panel); color:var(--dim); font-weight:600; }
+  td:first-child, th:first-child, td.l, th.l { text-align:left; }
+  tbody tr { cursor:pointer; } tbody tr:hover { background:#1c2330; }
+  .long { color:var(--green); } .short { color:var(--red); }
+  .pos { color:var(--green); } .neg { color:var(--red); }
+  .setup-BOS { color:var(--blue); } .setup-CHoCH { color:var(--orange); } .setup-SWEEP { color:var(--purple); }
+</style>
+</head>
+<body>
+<header>
+  <div class="group"><label>symbol</label><input id="symbol" type="text" value="BTCUSDT"></div>
+  <div class="group" id="syms"></div>
+  <div class="group" id="tfs"></div>
+  <div class="group"><label>bars</label>
+    <select id="bars"><option>300</option><option selected>600</option><option>1000</option><option>2000</option><option>3000</option></select>
+  </div>
+  <div class="group"><label>pivot-n</label><input id="pivotN" class="num" value="3"></div>
+  <div class="group"><label>swing dev (ATR, 0=pivot-n)</label><input id="swingDev" class="num" value="1"></div>
+  <div class="group"><label>target R</label><input id="targetR" class="num" value="4"></div>
+  <div class="group"><label>tp50%+BEP at (R, 0=off)</label><input id="partialR" class="num" value="0.5"></div>
+  <div class="group"><label>max stop ATR</label><input id="maxStopATR" class="num" value="3"></div>
+  <div class="group"><label>signals</label>
+    <select id="signals"><option selected>both</option><option>bos</option><option>choch</option></select>
+  </div>
+  <div class="group"><label>model</label>
+    <select id="trendModel"><option value="leg" selected>leg (protected swing)</option><option value="lux">lux (LuxAlgo SMC)</option><option value="pivot">pivot (naive)</option></select>
+    <label>lux len</label><input id="luxLen" class="num" value="50">
+  </div>
+  <div class="group"><label>HTF filter</label>
+    <select id="htf"><option value="off" selected>off</option><option>15m</option><option>30m</option><option>1h</option><option>4h</option><option>1d</option></select>
+  </div>
+  <div class="group">
+    <label><input type="checkbox" id="fvg" checked> FVG entry</label>
+    <label><input type="checkbox" id="fvgMid" checked> midpoint</label>
+    <label>lookback</label><input id="fvgLookback" class="num" value="5">
+    <label><input type="checkbox" id="moveStopBOS" checked> BOS trail</label>
+    <label><input type="checkbox" id="fvgStop"> FVG stop</label>
+    <label>buf</label><input id="fvgStopBuf" class="num" value="0.1">
+    <label><input type="checkbox" id="strictChoch"> strict CHoCH</label>
+  </div>
+  <div class="group">
+    <label><input type="checkbox" id="sessions"> block session opens/closes ±</label>
+    <input id="sessionBuf" class="num" value="30"><label>m (Tokyo/London/NY)</label>
+    <label><input type="checkbox" id="ladder"> ladder (replaces BOS trail/target):</label>
+    <label>step</label><input id="ladderStep" class="num" value="2">
+    <label>trail</label><input id="ladderTrail" class="num" value="1">
+    <label>cap</label><input id="ladderMax" class="num" value="10">
+    <label style="margin-left:10px"><input type="checkbox" id="rtrail"> R-trail (full size, no target):</label>
+    <label>start</label><input id="rtrailStart" class="num" value="2">
+    <label>step</label><input id="rtrailStep" class="num" value="1">
+    <label>offset</label><input id="rtrailOff" class="num" value="0.5">
+  </div>
+  <button id="start">Start</button>
+</header>
+<div class="toggles">
+  <b style="color:var(--dim)">show:</b>
+  <label><input type="checkbox" id="showPivots" checked> structure line (H/L)</label>
+  <label><input type="checkbox" id="showBreaks" checked> BOS / CHoCH</label>
+  <label><input type="checkbox" id="showFVG" checked> FVG zones</label>
+  <label><input type="checkbox" id="showTrades" checked> entries / SL / TP</label>
+  <label><input type="checkbox" id="showSkips"> skipped breaks</label>
+  <b style="color:var(--dim);margin-left:14px">screener:</b>
+  <label>top</label>
+  <select id="scanTop"><option>20</option><option selected>30</option><option>50</option></select>
+  <label>min score</label><input id="scanMin" class="num" value="60">
+  <button id="scanBtn" class="tfbtn" style="color:var(--text)">Scan universe</button>
+  <span id="status">pick a timeframe and press Start</span>
+</div>
+<div id="scanres" style="max-height:24vh;overflow:auto;display:none"></div>
+<div id="summary"></div>
+<div id="chart"></div>
+<div id="trades"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const SYMS = ["BTCUSDT","ETHUSDT","SOLUSDT"];
+const symsEl = $("syms");
+for (const s of SYMS) {
+  const b = document.createElement("button");
+  b.className = "tfbtn" + (s === "BTCUSDT" ? " active" : ""); b.textContent = s.replace("USDT","");
+  b.onclick = () => {
+    $("symbol").value = s;
+    [...symsEl.children].forEach(x => x.classList.toggle("active", x.textContent === s.replace("USDT","")));
+    run();
+  };
+  symsEl.appendChild(b);
+}
+// typing a custom symbol clears the preset highlight
+$("symbol").addEventListener("input", () =>
+  [...symsEl.children].forEach(x => x.classList.toggle("active", x.textContent === $("symbol").value.toUpperCase().replace("USDT",""))));
+
+const TFS = ["1m","5m","1h","4h","1d"];
+let tf = "4h";
+const tfsEl = $("tfs");
+for (const t of TFS) {
+  const b = document.createElement("button");
+  b.className = "tfbtn" + (t === tf ? " active" : ""); b.textContent = t;
+  b.onclick = () => { tf = t; [...tfsEl.children].forEach(x => x.classList.toggle("active", x.textContent === t)); };
+  tfsEl.appendChild(b);
+}
+
+const chart = LightweightCharts.createChart($("chart"), {
+  layout: { background: { color: "#0e1117" }, textColor: "#7d8797" },
+  grid: { vertLines: { color: "#161b24" }, horzLines: { color: "#161b24" } },
+  timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#252c3a" },
+  rightPriceScale: { borderColor: "#252c3a" },
+  crosshair: { mode: 0 },
+  autoSize: true,
+});
+const candles = chart.addCandlestickSeries({
+  upColor: "#26a69a", downColor: "#ef5350", wickUpColor: "#26a69a",
+  wickDownColor: "#ef5350", borderVisible: false,
+  priceFormat: { type: "price", precision: 2, minMove: 0.01 },
+});
+
+// ---- overlay primitive: draws FVG boxes, entry/SL/TP lines in chart space ----
+class Shapes {
+  constructor(chart, series) {
+    this.chart = chart; this.series = series; this.shapes = [];
+    const self = this;
+    this._view = { renderer: () => ({ draw: t => self._draw(t) }), zOrder: () => "normal" };
+  }
+  paneViews() { return [this._view]; }
+  updateAllViews() {}
+  set(shapes) { this.shapes = shapes; }
+  _x(i) {
+    const vr = this.chart.timeScale().getVisibleLogicalRange();
+    if (vr) i = Math.max(vr.from - 5, Math.min(vr.to + 5, i)); // clamp so offscreen ends still draw
+    return this.chart.timeScale().logicalToCoordinate(i);
+  }
+  _y(p) { return this.series.priceToCoordinate(p); }
+  _draw(target) {
+    const self = this;
+    target.useMediaCoordinateSpace(scope => {
+      const ctx = scope.context;
+      for (const s of self.shapes) {
+        if (s.kind === "box") {
+          const x1 = self._x(s.i1), x2 = self._x(s.i2), y1 = self._y(s.p1), y2 = self._y(s.p2);
+          if (x1 == null || x2 == null || y1 == null || y2 == null) continue;
+          ctx.fillStyle = s.fill;
+          ctx.fillRect(x1, Math.min(y1, y2), x2 - x1, Math.abs(y2 - y1) || 1);
+          if (s.stroke) { ctx.strokeStyle = s.stroke; ctx.lineWidth = 1; ctx.setLineDash([]);
+            ctx.strokeRect(x1, Math.min(y1, y2), x2 - x1, Math.abs(y2 - y1) || 1); }
+        } else if (s.kind === "polyline") {
+          ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.5; ctx.setLineDash(s.dash || []);
+          ctx.beginPath();
+          let started = false;
+          for (const pt of s.points) {
+            const x = self._x(pt.i), y = self._y(pt.p);
+            if (x == null || y == null) continue;
+            if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+          }
+          ctx.stroke(); ctx.setLineDash([]);
+          if (s.label) { // label at the line's right end
+            const last = s.points[s.points.length - 1];
+            const x = self._x(last.i), y = self._y(last.p);
+            if (x != null && y != null) {
+              ctx.font = "10px -apple-system, 'Segoe UI', sans-serif";
+              ctx.fillStyle = s.color;
+              ctx.fillText(s.label, x + 5, y + 3);
+            }
+          }
+        }
+      }
+    });
+  }
+}
+const shapes = new Shapes(chart, candles);
+candles.attachPrimitive(shapes);
+
+let data = null;      // last /api/run response
+let timeIdx = new Map(); // unix sec -> candle index
+
+function idxOf(t) { // candle index containing time t (events are keyed to open times)
+  if (timeIdx.has(t)) return timeIdx.get(t);
+  const a = data.candles; let lo = 0, hi = a.length - 1, ans = 0;
+  while (lo <= hi) { const m = (lo + hi) >> 1; if (a[m].t <= t) { ans = m; lo = m + 1; } else hi = m - 1; }
+  return ans;
+}
+
+async function run() {
+  const btn = $("start"); btn.disabled = true;
+  $("status").textContent = `fetching ${$("symbol").value.toUpperCase()} ${tf} klines + replaying engine…`;
+  try {
+    const p = new URLSearchParams({
+      symbol: $("symbol").value, interval: tf, bars: $("bars").value, ...engineParams(),
+    });
+    const res = await fetch("/api/run?" + p);
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || res.statusText);
+    data = j;
+    timeIdx = new Map(j.candles.map((c, i) => [c.t, i]));
+    const prec = precisionFor(j.candles);
+    candles.applyOptions({ priceFormat: { type: "price", precision: prec, minMove: Math.pow(10, -prec) } });
+    candles.setData(j.candles.map(c => ({ time: c.t, open: c.o, high: c.h, low: c.l, close: c.c })));
+    chart.timeScale().fitContent();
+    render();
+    summarize(j);
+    tradeTable(j);
+    $("status").textContent = `${j.symbol} ${j.interval} — ${j.candles.length} candles, ` +
+      `${j.events.filter(e => e.type === "break").length} breaks, ${j.trades.length} trades` +
+      (j.open ? " (+1 open)" : "");
+  } catch (e) {
+    $("status").textContent = "error: " + e.message;
+  } finally { btn.disabled = false; }
+}
+
+function precisionFor(cs) {
+  const px = cs[cs.length - 1].c;
+  if (px >= 1000) return 2;
+  if (px >= 1) return 4;
+  return Math.min(10, 2 - Math.floor(Math.log10(px)));
+}
+
+// ---- rendering: markers + shapes from events/trades, honoring the toggles ----
+function render() {
+  if (!data) return;
+  const show = { pivots: $("showPivots").checked, breaks: $("showBreaks").checked,
+                 fvg: $("showFVG").checked, trades: $("showTrades").checked, skips: $("showSkips").checked };
+  const mk = [], sh = [];
+  const lastIdx = data.candles.length - 1;
+
+  for (const e of data.events) {
+    // (pivot events are drawn as the structure zigzag line, below)
+    if (e.type === "partial" && show.trades)
+      mk.push({ time: e.t, position: e.side === "long" ? "aboveBar" : "belowBar", shape: "circle",
+                color: "#26a69a", text: "tp50 +" + e.r.toFixed(2) + "R", size: 1 });
+    if (e.type === "break" && show.breaks) {
+      // Horizontal line along the broken swing: from the pivot that formed the
+      // level (LH/HL/HH/LL) to the candle whose close broke it.
+      const i1 = e.t2 ? idxOf(e.t2) : Math.max(0, idxOf(e.t) - 10);
+      const color = e.setup === "CHoCH" ? "#f5a623" : "#4d8bf5";
+      sh.push({ kind: "polyline", points: [{ i: i1, p: e.level }, { i: idxOf(e.t), p: e.level }],
+                color, width: 1.5, label: e.setup + (e.side === "long" ? " ▲" : " ▼") });
+    }
+    if (e.type === "sweep" && show.breaks)
+      mk.push({ time: e.t, position: e.side === "long" ? "belowBar" : "aboveBar",
+                shape: "circle", color: "#b57af5", text: "SWEEP", size: 0 });
+    if (e.type === "skip" && show.skips)
+      mk.push({ time: e.t, position: "aboveBar", shape: "square", color: "#5a6478",
+                text: "skip: " + e.reason, size: 0 });
+  }
+
+  // Structure zigzag: connect the engine's confirmed swing highs/lows in time
+  // order — this IS the engine's view of structure; judge H/L quality here.
+  if (show.pivots) {
+    const pts = data.events
+      .filter(e => e.type === "pivot_high" || e.type === "pivot_low")
+      .sort((a, b) => a.t - b.t)
+      .map(e => ({ i: idxOf(e.t), p: e.price }));
+    if (pts.length > 1)
+      sh.push({ kind: "polyline", points: pts, color: "rgba(125,135,151,.55)", width: 1.5 });
+  }
+
+  // FVG zones: pair each fvg_limit with the next fill/cancel of the same side.
+  if (show.fvg) {
+    const evs = data.events;
+    for (let i = 0; i < evs.length; i++) {
+      const e = evs[i];
+      if (e.type !== "fvg_limit") continue;
+      let end = Math.min(lastIdx, idxOf(e.t) + 12), filled = false;
+      for (let j2 = i + 1; j2 < evs.length; j2++) {
+        const f = evs[j2];
+        if (f.type === "fvg_limit") break;
+        if ((f.type === "limit_filled" || f.type === "limit_cancelled") && f.side === e.side) {
+          end = idxOf(f.t); filled = f.type === "limit_filled"; break;
+        }
+      }
+      const long = e.side === "long";
+      sh.push({ kind: "box", i1: idxOf(e.t2), i2: end, p1: e.lo, p2: e.hi,
+                fill: long ? "rgba(38,166,154,.15)" : "rgba(239,83,80,.15)",
+                stroke: long ? "rgba(38,166,154,.5)" : "rgba(239,83,80,.5)" });
+      sh.push({ kind: "polyline", points: [{ i: idxOf(e.t), p: e.level }, { i: end, p: e.level }],
+                color: filled ? "#e8c53a" : "#8a93a5", width: 1, dash: [2, 3] });
+    }
+  }
+
+  if (show.trades) {
+    const all = data.trades.map(t => ({ ...t, open: false }));
+    if (data.open) all.push({ ...data.open, exitT: data.candles[lastIdx].t, exit: null,
+                              initStop: data.open.stop, open: true });
+    for (const t of all) {
+      const iE = idxOf(t.entryT), iX = idxOf(t.exitT);
+      const long = t.side === "long";
+      mk.push({ time: t.entryT, position: long ? "belowBar" : "aboveBar",
+        shape: long ? "arrowUp" : "arrowDown", color: long ? "#26a69a" : "#ef5350",
+        text: (t.open ? "OPEN " : "") + t.side.toUpperCase() + " " + t.setup, size: 2 });
+      if (!t.open)
+        mk.push({ time: t.exitT, position: long ? "aboveBar" : "belowBar", shape: "circle",
+          color: t.r >= 0 ? "#26a69a" : "#ef5350", text: t.outcome + " " + t.r.toFixed(2) + "R", size: 1 });
+      // entry / target lines
+      sh.push({ kind: "polyline", points: [{ i: iE, p: t.entry }, { i: iX, p: t.entry }],
+                color: "#8a93a5", width: 1, dash: [4, 3] });
+      sh.push({ kind: "polyline", points: [{ i: iE, p: t.target }, { i: iX, p: t.target }],
+                color: "rgba(38,166,154,.9)", width: 1, dash: [4, 3] });
+      // stepped stop line from stop_move events inside the trade window
+      const pts = [{ i: iE, p: t.initStop }];
+      let cur = t.initStop;
+      for (const e of data.events) {
+        if (e.type !== "stop_move" || e.t <= t.entryT || e.t > t.exitT) continue;
+        const im = idxOf(e.t);
+        pts.push({ i: im, p: cur }, { i: im, p: e.price });
+        cur = e.price;
+      }
+      pts.push({ i: iX, p: cur });
+      sh.push({ kind: "polyline", points: pts, color: "rgba(239,83,80,.9)", width: 1.5 });
+    }
+  }
+
+  mk.sort((a, b) => a.time - b.time);
+  candles.setMarkers(mk);
+  shapes.set(sh);
+}
+
+function summarize(j) {
+  const w = j.trades.filter(t => t.r > 0).length, n = j.trades.length;
+  const html = [
+    `<span>trades</span> <b>${n}${j.open ? " +1 open" : ""}</b>`,
+    `<span>win</span> <b>${n ? (100 * w / n).toFixed(1) : 0}%</b>`,
+    `<span>net</span> <b class="${j.netR >= 0 ? "pos" : "neg"}">${j.netR.toFixed(2)}R</b>`,
+    `<span>config</span> <b>${j.config.trendModel} model · ${j.config.trendModel === "lux" ? "len " + j.config.luxLen : j.config.swingDev > 0 ? "dev " + j.config.swingDev + "ATR" : "pivot " + j.config.pivotN} · 1:${j.config.targetR} · ${j.config.signals}` +
+      `${j.config.htf && j.config.htf !== "off" ? " · HTF-" + j.config.htf : ""}` +
+      `${j.config.fvg ? " · FVG" + (j.config.fvgMid ? "-mid" : "") + "(lb" + j.config.fvgLookback + ")" + (j.config.fvgStop ? " · FVG-stop(" + j.config.fvgStopBuf + "ATR)" : "") : ""}` +
+      `${j.config.ladder
+          ? " · ladder " + j.config.ladderStep + "R/50% trail-" + j.config.ladderTrail + "R cap" + j.config.ladderMax + "R"
+          : (j.config.moveStopBOS ? " · BOS-trail" : "") +
+            (j.config.partialR > 0 ? " · tp50@" + j.config.partialR + "R→BEP" : "")}` +
+      `${j.config.strictChoch ? " · strict-CHoCH" : ""}` +
+      `${j.config.sessions ? " · no-session±" + j.config.sessionBuf + "m" : ""}` +
+      `${j.config.rtrail ? " · R-trail " + j.config.rtrailStart + "R/+" + j.config.rtrailStep + "R−" + j.config.rtrailOff + "R" : ""}</b>`,
+    `<span style="margin-left:auto">gross R — no fees/slippage, no portfolio caps: logic verification only</span>`,
+  ];
+  $("summary").innerHTML = html.map(x => `<div>${x}</div>`).join("");
+}
+
+function tradeTable(j) {
+  const fmt = t => new Date(t * 1000).toISOString().slice(0, 16).replace("T", " ");
+  const px = p => p.toFixed(precisionFor(j.candles));
+  let cum = 0;
+  const rows = j.trades.map((t, i) => {
+    cum += t.r;
+    return `<tr data-e="${t.entryT}" data-x="${t.exitT}">
+      <td>${i + 1}</td><td class="l">${fmt(t.entryT)}</td>
+      <td class="l ${t.side}">${t.side.toUpperCase()}</td>
+      <td class="l setup-${t.setup}">${t.setup}</td>
+      <td>${px(t.entry)}</td><td>${px(t.initStop)}</td><td>${px(t.target)}</td>
+      <td class="l">${t.outcome}</td>
+      <td class="${t.r >= 0 ? "pos" : "neg"}">${t.r.toFixed(2)}</td>
+      <td class="${cum >= 0 ? "pos" : "neg"}">${cum.toFixed(2)}</td></tr>`;
+  });
+  if (j.open) rows.push(`<tr data-e="${j.open.entryT}" data-x="${j.candles[j.candles.length-1].t}">
+      <td>—</td><td class="l">${fmt(j.open.entryT)}</td>
+      <td class="l ${j.open.side}">${j.open.side.toUpperCase()}</td>
+      <td class="l setup-${j.open.setup}">${j.open.setup}</td>
+      <td>${px(j.open.entry)}</td><td>${px(j.open.stop)}</td><td>${px(j.open.target)}</td>
+      <td class="l">open</td><td>—</td><td>—</td></tr>`);
+  $("trades").innerHTML = `<table><thead><tr>
+    <th>#</th><th class="l">entry (UTC)</th><th class="l">side</th><th class="l">setup</th>
+    <th>entry</th><th>stop</th><th>target</th><th class="l">outcome</th><th>R</th><th>cum R</th>
+    </tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  $("trades").querySelectorAll("tbody tr").forEach(tr => tr.onclick = () => {
+    const iE = idxOf(+tr.dataset.e), iX = idxOf(+tr.dataset.x);
+    chart.timeScale().setVisibleLogicalRange({ from: iE - 40, to: iX + 40 });
+  });
+}
+
+// engine knobs shared by /api/run and /api/scan so the scan sees exactly
+// what the chart draws
+function engineParams() {
+  return {
+    pivotN: $("pivotN").value, targetR: $("targetR").value, maxStopATR: $("maxStopATR").value,
+    signals: $("signals").value, fvg: $("fvg").checked ? 1 : 0,
+    fvgMid: $("fvgMid").checked ? 1 : 0, moveStopBOS: $("moveStopBOS").checked ? 1 : 0,
+    strictChoch: $("strictChoch").checked ? 1 : 0,
+    trendModel: $("trendModel").value, swingDev: $("swingDev").value, luxLen: $("luxLen").value,
+    htf: $("htf").value,
+    fvgLookback: $("fvgLookback").value,
+    fvgStop: $("fvgStop").checked ? 1 : 0, fvgStopBuf: $("fvgStopBuf").value,
+    partialR: $("partialR").value, ladder: $("ladder").checked ? 1 : 0,
+    ladderStep: $("ladderStep").value, ladderTrail: $("ladderTrail").value,
+    ladderMax: $("ladderMax").value,
+    sessions: $("sessions").checked ? "asia,london,us" : "", sessionBuf: $("sessionBuf").value,
+    rtrail: $("rtrail").checked ? 1 : 0, rtrailStart: $("rtrailStart").value,
+    rtrailStep: $("rtrailStep").value, rtrailOff: $("rtrailOff").value,
+  };
+}
+
+// ---- screener panel: scan the universe, click a row to draw the setup ----
+async function scan() {
+  const btn = $("scanBtn"); btn.disabled = true;
+  $("status").textContent = `scanning top ${$("scanTop").value} on ${tf} (first scan fetches a lot of data)…`;
+  try {
+    const p = new URLSearchParams({ interval: tf, top: $("scanTop").value, ...engineParams() });
+    const res = await fetch("/api/scan?" + p);
+    const j = await res.json();
+    if (!res.ok) throw new Error(j.error || res.statusText);
+    renderScan(j);
+    $("status").textContent = `${j.candidates.length} setups on ${j.interval} (HTF ${j.htf}) — click a row to draw it on the chart`;
+  } catch (e) {
+    $("status").textContent = "scan error: " + e.message;
+  } finally { btn.disabled = false; }
+}
+
+function renderScan(j) {
+  const min = +$("scanMin").value || 0;
+  const fmt = t => new Date(t * 1000).toISOString().slice(5, 16).replace("T", " ");
+  const rows = j.candidates.map(c => `<tr data-sym="${c.symbol}" data-t="${c.t}">
+      <td class="${c.score >= min ? "pos" : ""}" style="font-weight:700">${c.score >= min ? "! " : ""}${c.score}</td>
+      <td class="l">${c.symbol}</td><td class="l">${fmt(c.t)}</td>
+      <td class="l">${c.stage}${c.resting ? " · resting" : ""}</td>
+      <td class="l ${c.side}">${c.side.toUpperCase()}</td>
+      <td class="l setup-${c.setup}">${c.setup}</td>
+      <td>${(+c.entry).toPrecision(6)}</td><td>${(+c.stop).toPrecision(6)}</td><td>${(+c.target).toPrecision(6)}</td>
+      <td class="l" style="color:var(--dim)">${c.parts}</td></tr>`);
+  $("scanres").style.display = "block";
+  $("scanres").innerHTML = `<table><thead><tr>
+      <th>score</th><th class="l">symbol</th><th class="l">time (UTC)</th><th class="l">stage</th>
+      <th class="l">side</th><th class="l">setup</th><th>entry</th><th>stop</th><th>target</th><th class="l">breakdown</th>
+    </tr></thead><tbody>${rows.join("")}</tbody></table>`;
+  $("scanres").querySelectorAll("tbody tr").forEach(trEl => trEl.onclick = () => {
+    $("symbol").value = trEl.dataset.sym;
+    $("symbol").dispatchEvent(new Event("input"));
+    const t = +trEl.dataset.t;
+    run().then(() => {
+      if (!data) return;
+      const i = idxOf(t);
+      chart.timeScale().setVisibleLogicalRange({ from: i - 60, to: i + 40 });
+    });
+  });
+}
+$("scanBtn").onclick = scan;
+
+$("start").onclick = run;
+$("symbol").addEventListener("keydown", e => { if (e.key === "Enter") run(); });
+for (const id of ["showPivots","showBreaks","showFVG","showTrades","showSkips"])
+  $(id).onchange = render;
+
+// ?autorun=1&symbol=ETHUSDT&tf=1h — run immediately on load (also handy for sharing links)
+const qp = new URLSearchParams(location.search);
+if (qp.get("tf") && TFS.includes(qp.get("tf"))) {
+  tf = qp.get("tf");
+  [...tfsEl.children].forEach(x => x.classList.toggle("active", x.textContent === tf));
+}
+if (qp.get("symbol")) {
+  $("symbol").value = qp.get("symbol");
+  $("symbol").dispatchEvent(new Event("input")); // sync preset-button highlight
+}
+if (qp.get("strict")) $("strictChoch").checked = true;
+if (qp.get("skips")) $("showSkips").checked = true;
+if (qp.get("model")) $("trendModel").value = qp.get("model");
+if (qp.get("luxlen")) $("luxLen").value = qp.get("luxlen");
+if (qp.get("scan")) scan();
+if (qp.get("autorun")) run().then(() => {
+  const z = qp.get("zoomtrade"); // 1-based trade index to zoom to (debug/screenshots)
+  if (z && data && data.trades[z - 1]) {
+    const t = data.trades[z - 1];
+    chart.timeScale().setVisibleLogicalRange({ from: idxOf(t.entryT) - 40, to: idxOf(t.exitT) + 40 });
+  }
+});
+</script>
+</body>
+</html>
