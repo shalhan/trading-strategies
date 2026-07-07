@@ -1,0 +1,17 @@
+# systemd unit — /etc/systemd/system/paper.service
+[Unit]
+Description=SMC paper trader (config 08)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=paper
+WorkingDirectory=/opt/paper
+ExecStart=/opt/paper/paper -state /opt/paper/state -datadir /opt/paper/data -addr :8899
+Restart=always
+RestartSec=30
+# put your webhook creds here (or TELEGRAM_TOKEN/TELEGRAM_CHAT):
+Environment=DISCORD_WEBHOOK=
+
+[Install]
+WantedBy=multi-user.target

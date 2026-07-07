@@ -1,0 +1,24 @@
+reusing frozen universe (20 symbols) from paper-state/universe.json
+paper account $260.00, risk 1%/trade ($2.60 = 1R), 20 symbols on 1h
+config 08: pivot·dev1·strict-CHoCH·FVG-edge(lb5)·R-trail 1/+1/−1·no-session±30m·min-stop 0.05%·max-stop 3ATR
+warming up structure on 900 bars (entries suppressed)...
+armed at 2026-07-06 23:16 UTC — paper trading live (Ctrl-C to stop; restart replays structure but starts flat)
+
+reusing frozen universe (20 symbols) from paper-state/universe.json
+paper account $260.00, risk 1%/trade ($2.60 = 1R), 20 symbols on 1h
+config 08: pivot·dev1·strict-CHoCH·FVG-edge(lb5)·R-trail 1/+1/−1·no-session±30m·min-stop 0.05%·max-stop 3ATR
+warming up structure on 900 bars (entries suppressed)...
+armed at 2026-07-07 12:52 UTC — paper trading live (Ctrl-C to stop; restart replays structure but starts flat)
+
+reusing frozen universe (20 symbols) from paper-state/universe.json
+paper account $260.00, risk 1%/trade ($2.60 = 1R), 20 symbols on 1h
+config 08b: pivot·dev1·strict-CHoCH·FVG-edge(lb5)·R-trail 1/+1/−1·no-session±30m·min-stop 0.05%·max-stop 3ATR·HTF-align 1d
+warming up structure on 900 bars (entries suppressed)...
+armed at 2026-07-07 13:16 UTC — paper trading live (Ctrl-C to stop; restart replays structure but starts flat)
+
+reusing frozen universe (20 symbols) from paper-state/universe.json
+paper account $260.00, risk 1%/trade ($2.60 = 1R), 20 symbols on 1h
+config 08b: pivot·dev1·strict-CHoCH·FVG-edge(lb5)·R-trail 1/+1/−1·no-session±30m·min-stop 0.05%·max-stop 3ATR·HTF-align 1d
+warming up structure on 1500 bars (entries suppressed)...
+armed at 2026-07-07 13:28 UTC — paper trading live (Ctrl-C to stop; restart replays structure but starts flat)
+

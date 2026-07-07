@@ -168,20 +168,55 @@ func handleRun(w http.ResponseWriter, r *http.Request, client *binance.Client, d
 		cfg.HTFAlign, cfg.HTFPeriod = true, hd
 	}
 
-	// Fetch the window plus ATR warmup slack; drop a still-forming last candle.
+	// Window: an explicit from/to date range (plus engine warmup slack before
+	// `from`), or the last `bars` candles. Drop a still-forming last candle.
 	now := time.Now().UTC()
-	start := now.Add(-d * time.Duration(bars+cfg.ATRPeriod+10))
+	end := now
+	if to := q.Get("to"); to != "" {
+		t, err := time.Parse("2006-01-02", to)
+		if err != nil {
+			return fmt.Errorf("bad to date %q (want YYYY-MM-DD)", to)
+		}
+		if e := t.Add(24 * time.Hour); e.Before(now) {
+			end = e
+		}
+	}
+	var start time.Time
+	warmup := d * time.Duration(cfg.ATRPeriod+8*cfg.PivotN+10)
+	// The HTF trend tracker needs many HTF buckets before it can even confirm
+	// a swing — without this, ranged runs leave the HTF filter inert.
+	if cfg.HTFAlign {
+		if hw := cfg.HTFPeriod * time.Duration(8*cfg.HTFPivotN+40); hw > warmup {
+			warmup = hw
+		}
+	}
+	if from := q.Get("from"); from != "" {
+		t, err := time.Parse("2006-01-02", from)
+		if err != nil {
+			return fmt.Errorf("bad from date %q (want YYYY-MM-DD)", from)
+		}
+		start = t.Add(-warmup) // warmup candles so signals exist from day one
+	} else {
+		start = end.Add(-d * time.Duration(bars+cfg.ATRPeriod+10))
+	}
+	if !start.Before(end) {
+		return fmt.Errorf("from must be before to")
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	ks, err := dataset.LoadKlines(ctx, client, dataDir, symbol, interval, start, now, true)
+	ks, err := dataset.LoadKlines(ctx, client, dataDir, symbol, interval, start, end, true)
 	if err != nil {
 		return fmt.Errorf("load klines %s %s: %w", symbol, interval, err)
 	}
-	for len(ks) > 0 && ks[len(ks)-1].CloseTime.After(now) {
+	for len(ks) > 0 && ks[len(ks)-1].CloseTime.After(end) {
 		ks = ks[:len(ks)-1]
 	}
+	// Keep ranged queries renderable: cap at 20k candles (keep the most recent).
+	if len(ks) > 20000 {
+		ks = ks[len(ks)-20000:]
+	}
 	if len(ks) < 50 {
-		return fmt.Errorf("only %d closed candles for %s %s", len(ks), symbol, interval)
+		return fmt.Errorf("only %d closed candles for %s %s in that range", len(ks), symbol, interval)
 	}
 
 	resp := replay(ks, cfg)
@@ -189,7 +224,8 @@ func handleRun(w http.ResponseWriter, r *http.Request, client *binance.Client, d
 	resp.Config = map[string]any{
 		"pivotN": cfg.PivotN, "targetR": cfg.TargetR, "maxStopATR": cfg.MaxStopATR,
 		"minStopPct": cfg.MinStopFrac * 100, "signals": cfg.Signals,
-		"fvg": cfg.UseFVG, "fvgMid": cfg.FVGMidpoint, "fvgLookback": cfg.FVGLookback, "moveStopBOS": cfg.MoveStopOnBOS,
+		"fvg": cfg.UseFVG, "fvgMid": cfg.FVGMidpoint, "fvgLookback": cfg.FVGLookback,
+		"fvgMinATR": cfg.FVGMinATR, "moveStopBOS": cfg.MoveStopOnBOS,
 		"breakEven": cfg.BreakEven, "strictChoch": cfg.StrictCHoCH,
 		"trendModel": cfg.TrendModel, "swingDev": cfg.SwingDevATR, "luxLen": cfg.LuxLen,
 		"htf": q.Get("htf"), "fvgStop": cfg.FVGStop, "fvgStopBuf": cfg.FVGStopBufATR,
@@ -294,16 +330,17 @@ func engineCfgFromQuery(q url.Values) structure.Config {
 		PivotN:           qInt(q.Get("pivotN"), 3),
 		ATRPeriod:        14,
 		MaxStopATR:       qFloat(q.Get("maxStopATR"), 3),
-		MinStopFrac:      qFloat(q.Get("minStopPct"), 0) / 100,
+		MinStopFrac:      qFloat(q.Get("minStopPct"), 0.05) / 100,
 		TargetR:          qFloat(q.Get("targetR"), 4),
 		Signals:          qStr(q.Get("signals"), "both"),
 		UseFVG:           qBool(q.Get("fvg"), true),
 		FVGLookback:      qInt(q.Get("fvgLookback"), 5),
-		FVGMidpoint:      qBool(q.Get("fvgMid"), true),
-		MoveStopOnBOS:    qBool(q.Get("moveStopBOS"), true),
+		FVGMinATR:        qFloat(q.Get("fvgMinATR"), 0),
+		FVGMidpoint:      qBool(q.Get("fvgMid"), false),
+		MoveStopOnBOS:    qBool(q.Get("moveStopBOS"), false),
 		BreakEven:        qBool(q.Get("breakEven"), false),
-		StrictCHoCH:      qBool(q.Get("strictChoch"), false),
-		TrendModel:       qStr(q.Get("trendModel"), "leg"),
+		StrictCHoCH:      qBool(q.Get("strictChoch"), true),
+		TrendModel:       qStr(q.Get("trendModel"), "pivot"),
 		LuxLen:           qInt(q.Get("luxLen"), 50),
 		SwingDevATR:      qFloat(q.Get("swingDev"), 1),
 		PartialAtR:       qFloat(q.Get("partialR"), 0),
@@ -313,12 +350,12 @@ func engineCfgFromQuery(q url.Values) structure.Config {
 		ScaleStepR:       qFloat(q.Get("ladderStep"), 2),
 		ScaleTrailR:      qFloat(q.Get("ladderTrail"), 1),
 		ScaleMaxR:        qFloat(q.Get("ladderMax"), 10),
-		BlackoutSessions: qStr(q.Get("sessions"), ""),
+		BlackoutSessions: qStr(q.Get("sessions"), "asia,london,us"),
 		SessionBufMin:    qInt(q.Get("sessionBuf"), 30),
-		RTrail:           qBool(q.Get("rtrail"), false),
-		RTrailStart:      qFloat(q.Get("rtrailStart"), 2),
+		RTrail:           qBool(q.Get("rtrail"), true),
+		RTrailStart:      qFloat(q.Get("rtrailStart"), 1),
 		RTrailStep:       qFloat(q.Get("rtrailStep"), 1),
-		RTrailOffset:     qFloat(q.Get("rtrailOff"), 0.5),
+		RTrailOffset:     qFloat(q.Get("rtrailOff"), 1),
 	}
 }
 

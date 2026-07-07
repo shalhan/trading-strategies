@@ -52,41 +52,46 @@
   <div class="group"><label>bars</label>
     <select id="bars"><option>300</option><option selected>600</option><option>1000</option><option>2000</option><option>3000</option></select>
   </div>
+  <div class="group"><label>or date range</label>
+    <input type="date" id="fromDate"><label>→</label><input type="date" id="toDate">
+  </div>
   <div class="group"><label>pivot-n</label><input id="pivotN" class="num" value="3"></div>
   <div class="group"><label>swing dev (ATR, 0=pivot-n)</label><input id="swingDev" class="num" value="1"></div>
   <div class="group"><label>target R</label><input id="targetR" class="num" value="4"></div>
-  <div class="group"><label>tp50%+BEP at (R, 0=off)</label><input id="partialR" class="num" value="0.5"></div>
+  <div class="group"><label>tp50%+BEP at (R, 0=off)</label><input id="partialR" class="num" value="0"></div>
   <div class="group"><label>max stop ATR</label><input id="maxStopATR" class="num" value="3"></div>
+  <div class="group"><label>min stop %</label><input id="minStopPct" class="num" value="0.05"></div>
   <div class="group"><label>signals</label>
     <select id="signals"><option selected>both</option><option>bos</option><option>choch</option></select>
   </div>
   <div class="group"><label>model</label>
-    <select id="trendModel"><option value="leg" selected>leg (protected swing)</option><option value="lux">lux (LuxAlgo SMC)</option><option value="pivot">pivot (naive)</option></select>
+    <select id="trendModel"><option value="pivot" selected>pivot (naive)</option><option value="leg">leg (protected swing)</option><option value="lux">lux (LuxAlgo SMC)</option></select>
     <label>lux len</label><input id="luxLen" class="num" value="50">
   </div>
   <div class="group"><label>HTF filter</label>
-    <select id="htf"><option value="off" selected>off</option><option>15m</option><option>30m</option><option>1h</option><option>4h</option><option>1d</option></select>
+    <select id="htf"><option value="off">off</option><option>15m</option><option>30m</option><option>1h</option><option>4h</option><option selected>1d</option></select>
   </div>
   <div class="group">
     <label><input type="checkbox" id="fvg" checked> FVG entry</label>
-    <label><input type="checkbox" id="fvgMid" checked> midpoint</label>
+    <label><input type="checkbox" id="fvgMid"> midpoint</label>
     <label>lookback</label><input id="fvgLookback" class="num" value="5">
-    <label><input type="checkbox" id="moveStopBOS" checked> BOS trail</label>
+    <label>min gap (ATR)</label><input id="fvgMinATR" class="num" value="0">
+    <label><input type="checkbox" id="moveStopBOS"> BOS trail</label>
     <label><input type="checkbox" id="fvgStop"> FVG stop</label>
     <label>buf</label><input id="fvgStopBuf" class="num" value="0.1">
-    <label><input type="checkbox" id="strictChoch"> strict CHoCH</label>
+    <label><input type="checkbox" id="strictChoch" checked> strict CHoCH</label>
   </div>
   <div class="group">
-    <label><input type="checkbox" id="sessions"> block session opens/closes ±</label>
+    <label><input type="checkbox" id="sessions" checked> block session opens/closes ±</label>
     <input id="sessionBuf" class="num" value="30"><label>m (Tokyo/London/NY)</label>
     <label><input type="checkbox" id="ladder"> ladder (replaces BOS trail/target):</label>
     <label>step</label><input id="ladderStep" class="num" value="2">
     <label>trail</label><input id="ladderTrail" class="num" value="1">
     <label>cap</label><input id="ladderMax" class="num" value="10">
-    <label style="margin-left:10px"><input type="checkbox" id="rtrail"> R-trail (full size, no target):</label>
-    <label>start</label><input id="rtrailStart" class="num" value="2">
+    <label style="margin-left:10px"><input type="checkbox" id="rtrail" checked> R-trail (full size, no target):</label>
+    <label>start</label><input id="rtrailStart" class="num" value="1">
     <label>step</label><input id="rtrailStep" class="num" value="1">
-    <label>offset</label><input id="rtrailOff" class="num" value="0.5">
+    <label>offset</label><input id="rtrailOff" class="num" value="1">
   </div>
   <button id="start">Start</button>
 </header>
@@ -129,7 +134,7 @@ $("symbol").addEventListener("input", () =>
   [...symsEl.children].forEach(x => x.classList.toggle("active", x.textContent === $("symbol").value.toUpperCase().replace("USDT",""))));
 
 const TFS = ["1m","5m","1h","4h","1d"];
-let tf = "4h";
+let tf = "1h";
 const tfsEl = $("tfs");
 for (const t of TFS) {
   const b = document.createElement("button");
@@ -224,6 +229,8 @@ async function run() {
     const p = new URLSearchParams({
       symbol: $("symbol").value, interval: tf, bars: $("bars").value, ...engineParams(),
     });
+    if ($("fromDate").value) p.set("from", $("fromDate").value);
+    if ($("toDate").value) p.set("to", $("toDate").value);
     const res = await fetch("/api/run?" + p);
     const j = await res.json();
     if (!res.ok) throw new Error(j.error || res.statusText);
@@ -359,7 +366,7 @@ function summarize(j) {
     `<span>net</span> <b class="${j.netR >= 0 ? "pos" : "neg"}">${j.netR.toFixed(2)}R</b>`,
     `<span>config</span> <b>${j.config.trendModel} model · ${j.config.trendModel === "lux" ? "len " + j.config.luxLen : j.config.swingDev > 0 ? "dev " + j.config.swingDev + "ATR" : "pivot " + j.config.pivotN} · 1:${j.config.targetR} · ${j.config.signals}` +
       `${j.config.htf && j.config.htf !== "off" ? " · HTF-" + j.config.htf : ""}` +
-      `${j.config.fvg ? " · FVG" + (j.config.fvgMid ? "-mid" : "") + "(lb" + j.config.fvgLookback + ")" + (j.config.fvgStop ? " · FVG-stop(" + j.config.fvgStopBuf + "ATR)" : "") : ""}` +
+      `${j.config.fvg ? " · FVG" + (j.config.fvgMid ? "-mid" : "") + "(lb" + j.config.fvgLookback + (j.config.fvgMinATR > 0 ? ",≥" + j.config.fvgMinATR + "ATR" : "") + ")" + (j.config.fvgStop ? " · FVG-stop(" + j.config.fvgStopBuf + "ATR)" : "") : ""}` +
       `${j.config.ladder
           ? " · ladder " + j.config.ladderStep + "R/50% trail-" + j.config.ladderTrail + "R cap" + j.config.ladderMax + "R"
           : (j.config.moveStopBOS ? " · BOS-trail" : "") +
@@ -408,17 +415,18 @@ function tradeTable(j) {
 function engineParams() {
   return {
     pivotN: $("pivotN").value, targetR: $("targetR").value, maxStopATR: $("maxStopATR").value,
+    minStopPct: $("minStopPct").value,
     signals: $("signals").value, fvg: $("fvg").checked ? 1 : 0,
     fvgMid: $("fvgMid").checked ? 1 : 0, moveStopBOS: $("moveStopBOS").checked ? 1 : 0,
     strictChoch: $("strictChoch").checked ? 1 : 0,
     trendModel: $("trendModel").value, swingDev: $("swingDev").value, luxLen: $("luxLen").value,
     htf: $("htf").value,
-    fvgLookback: $("fvgLookback").value,
+    fvgLookback: $("fvgLookback").value, fvgMinATR: $("fvgMinATR").value,
     fvgStop: $("fvgStop").checked ? 1 : 0, fvgStopBuf: $("fvgStopBuf").value,
     partialR: $("partialR").value, ladder: $("ladder").checked ? 1 : 0,
     ladderStep: $("ladderStep").value, ladderTrail: $("ladderTrail").value,
     ladderMax: $("ladderMax").value,
-    sessions: $("sessions").checked ? "asia,london,us" : "", sessionBuf: $("sessionBuf").value,
+    sessions: $("sessions").checked ? "asia,london,us" : "off", sessionBuf: $("sessionBuf").value,
     rtrail: $("rtrail").checked ? 1 : 0, rtrailStart: $("rtrailStart").value,
     rtrailStep: $("rtrailStep").value, rtrailOff: $("rtrailOff").value,
   };

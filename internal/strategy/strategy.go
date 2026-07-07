@@ -153,6 +153,11 @@ type Trade struct {
 	MakerEntry bool    // true if entered via a resting limit order (maker fee, no entry slippage)
 	Trigger    float64 // break-even trigger level (the prev swing high/low); 0 if unused
 	BEPArmed   bool    // true if the break-even stop was armed (price reached Trigger)
+
+	// Features is an optional snapshot of the engine's state at the moment the
+	// entry was decided (for offline confidence-model training). Keys are
+	// feature names; values are already normalized (ATR multiples, ratios).
+	Features map[string]float64
 }
 
 // OpenPosition is a read-only snapshot of a live position for the portfolio
@@ -178,10 +183,10 @@ type Engine struct {
 	atr *indicator.ATR
 
 	// trend filter indicators; nil when the filter is disabled
-	emaFast *indicator.EMA
-	emaSlow *indicator.EMA
-	fastVal float64
-	slowVal float64
+	emaFast  *indicator.EMA
+	emaSlow  *indicator.EMA
+	fastVal  float64
+	slowVal  float64
 	emaReady bool
 
 	state State

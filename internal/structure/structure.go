@@ -364,6 +364,11 @@ type Engine struct {
 	// Session blackout windows (from Config.BlackoutSessions), DST-aware.
 	blackouts []sessionWindow
 
+	// Feature-snapshot support: rolling volume window and the bar of the last
+	// trend flip (trade features for offline confidence training).
+	vols        []float64
+	lastFlipBar int
+
 	// Observability (see events.go). lastK is the candle currently being
 	// stepped, so events emitted outside Step (e.g. Resolve) can be timestamped.
 	onEvent func(Event)
@@ -436,6 +441,7 @@ type sweepState struct {
 
 // restingLimit is an FVG limit order waiting to be filled on a retrace.
 type restingLimit struct {
+	feats    map[string]float64
 	side     strategy.Side
 	setup    string
 	level    float64 // limit price (gap edge)
@@ -448,6 +454,7 @@ type restingLimit struct {
 }
 
 type pendingEntry struct {
+	feats    map[string]float64
 	side     strategy.Side
 	setup    string
 	time     time.Time
@@ -468,6 +475,7 @@ type position struct {
 	stop        float64
 	target      float64
 	stopDist    float64
+	feats       map[string]float64
 	trigger     float64
 	beArmed     bool
 	partialDone bool
@@ -530,6 +538,10 @@ func (e *Engine) OpenPosition() *strategy.OpenPosition {
 // else watch for a structure break.
 func (e *Engine) Step(k kline.Kline) strategy.StepResult {
 	e.lastK = k
+	e.vols = append(e.vols, k.Volume)
+	if len(e.vols) > 20 {
+		e.vols = e.vols[1:]
+	}
 	atrVal, atrReady := e.atr.Update(k)
 	e.lastATR, e.lastATRReady = atrVal, atrReady
 	e.updateSwings(k)
@@ -629,7 +641,7 @@ func (e *Engine) legDetect(k kline.Kline, atrVal float64, atrReady bool) strateg
 		// CHoCH long: close above the lower high that led to the trend's low.
 		if e.haveProtHigh && k.Close > e.protHigh {
 			lvl, lvlT := e.protHigh, e.protHighT
-			e.trend = trendBull
+			e.setTrend(trendBull)
 			e.haveProtHigh = false
 			// The new uptrend's protected low is the bottom it reversed from.
 			e.protLow, e.protLowT, e.haveProtLow = e.extLow, e.extLowT, true
@@ -654,7 +666,7 @@ func (e *Engine) legDetect(k kline.Kline, atrVal float64, atrReady bool) strateg
 	case trendBull:
 		if e.haveProtLow && k.Close < e.protLow {
 			lvl, lvlT := e.protLow, e.protLowT
-			e.trend = trendBear
+			e.setTrend(trendBear)
 			e.haveProtLow = false
 			e.protHigh, e.protHighT, e.haveProtHigh = e.extHigh, e.extHighT, true
 			e.extLow, e.extLowT = k.Low, k.OpenTime
@@ -677,7 +689,7 @@ func (e *Engine) legDetect(k kline.Kline, atrVal float64, atrReady bool) strateg
 		if e.haveSwingHigh && !e.swingHighBroken && k.Close > e.swingHigh {
 			e.swingHighBroken = true
 			lvl, lvlT := e.swingHigh, e.swingHighTime
-			e.trend = trendBull
+			e.setTrend(trendBull)
 			e.protLow, e.protLowT, e.haveProtLow = e.minSinceHigh, e.minSinceHighT, true
 			e.extHigh, e.extHighT = k.High, k.OpenTime
 			e.emit(Event{Type: "break", Time: k.OpenTime, Time2: lvlT, Side: "long", Setup: "BOS", Level: lvl, Price: k.Close})
@@ -686,7 +698,7 @@ func (e *Engine) legDetect(k kline.Kline, atrVal float64, atrReady bool) strateg
 		if e.haveSwingLow && !e.swingLowBroken && k.Close < e.swingLow {
 			e.swingLowBroken = true
 			lvl, lvlT := e.swingLow, e.swingLowTime
-			e.trend = trendBear
+			e.setTrend(trendBear)
 			e.protHigh, e.protHighT, e.haveProtHigh = e.maxSinceLow, e.maxSinceLowT, true
 			e.extLow, e.extLowT = k.Low, k.OpenTime
 			e.emit(Event{Type: "break", Time: k.OpenTime, Time2: lvlT, Side: "short", Setup: "BOS", Level: lvl, Price: k.Close})
@@ -819,7 +831,8 @@ func (e *Engine) handleLimit(k kline.Kline) *strategy.Proposal {
 	}
 	if filled {
 		e.pending = &pendingEntry{
-			side: l.side, setup: l.setup, time: k.CloseTime, entry: l.level,
+			feats: l.feats,
+			side:  l.side, setup: l.setup, time: k.CloseTime, entry: l.level,
 			stop: l.stop, target: l.target, stopDist: l.stopDist, trigger: l.trigger,
 			atr: l.atr, maker: true,
 		}
@@ -1041,6 +1054,73 @@ func (e *Engine) updateSwingsLux(k kline.Kline) {
 	}
 }
 
+// setTrend records trend flips (feature: trend age at entry).
+func (e *Engine) setTrend(t trendDir) {
+	if e.trend != t {
+		e.lastFlipBar = e.bar
+	}
+	e.trend = t
+}
+
+// features snapshots the decision context at signal time, normalized so values
+// compare across symbols (ATR multiples, ratios, z-scores). Used for offline
+// confidence-model training; must only use information available at the close
+// of the signal candle.
+func (e *Engine) features(k kline.Kline, side strategy.Side, setup string,
+	entry, stopDist, fvgLo, fvgHi, atrVal float64) map[string]float64 {
+	f := map[string]float64{}
+	b := func(name string, cond bool) {
+		if cond {
+			f[name] = 1
+		} else {
+			f[name] = 0
+		}
+	}
+	b("setup_choch", setup == "CHoCH")
+	b("side_long", side == strategy.Long)
+	if atrVal > 0 {
+		f["stop_atr"] = stopDist / atrVal
+		f["gap_atr"] = (fvgHi - fvgLo) / atrVal
+		f["entry_dist_atr"] = math.Abs(k.Close-entry) / atrVal
+		f["body_atr"] = math.Abs(k.Close-k.Open) / atrVal
+		f["range_atr"] = (k.High - k.Low) / atrVal
+	}
+	if entry > 0 {
+		f["stop_pct"] = stopDist / entry * 100
+	}
+	if k.Close > 0 {
+		f["atr_pct"] = atrVal / k.Close * 100
+	}
+	if rng := k.High - k.Low; rng > 0 {
+		f["close_pos"] = (k.Close - k.Low) / rng
+	}
+	// volume z-score vs the rolling window
+	if n := len(e.vols); n >= 10 {
+		var mean, sq float64
+		for _, v := range e.vols {
+			mean += v
+		}
+		mean /= float64(n)
+		for _, v := range e.vols {
+			sq += (v - mean) * (v - mean)
+		}
+		if sd := math.Sqrt(sq / float64(n)); sd > 0 {
+			f["vol_z"] = (k.Volume - mean) / sd
+		}
+	}
+	f["hour"] = float64(k.OpenTime.UTC().Hour())
+	f["dow"] = float64(k.OpenTime.UTC().Weekday())
+	f["trend_age"] = float64(e.bar - e.lastFlipBar)
+	if e.htfTracker != nil {
+		dir := 1.0
+		if side == strategy.Short {
+			dir = -1
+		}
+		f["htf_align"] = dir * float64(e.htfTracker.Trend())
+	}
+	return f
+}
+
 func appendCap(s []float64, v float64) []float64 {
 	s = append(s, v)
 	if len(s) > 4 {
@@ -1091,12 +1171,12 @@ func (e *Engine) tryEnter(k kline.Kline, side strategy.Side, atrVal float64, atr
 	if side == strategy.Long {
 		e.swingHighBroken = true
 		if !unconfirmed {
-			e.trend = trendBull
+			e.setTrend(trendBull)
 		}
 	} else {
 		e.swingLowBroken = true
 		if !unconfirmed {
-			e.trend = trendBear
+			e.setTrend(trendBear)
 		}
 	}
 	// Time2 = the broken pivot's candle, so a UI can draw the level from where
@@ -1210,10 +1290,13 @@ func (e *Engine) proposeEntry(k kline.Kline, side strategy.Side, setup string, t
 		target = entry - e.cfg.TargetR*stopDist
 	}
 
+	feats := e.features(k, side, setup, entry, stopDist, fvgLo, fvgHi, atrVal)
+
 	// FVG mode: rest a limit; the trade is proposed only when/if it fills.
 	if e.cfg.UseFVG {
 		e.limit = &restingLimit{
-			side: side, setup: setup, level: entry, stop: stop, target: target,
+			feats: feats,
+			side:  side, setup: setup, level: entry, stop: stop, target: target,
 			stopDist: stopDist, trigger: trigger, atr: atrVal, barsLeft: e.cfg.FVGMaxWaitBars,
 		}
 		e.emit(Event{
@@ -1225,7 +1308,8 @@ func (e *Engine) proposeEntry(k kline.Kline, side strategy.Side, setup string, t
 	}
 
 	e.pending = &pendingEntry{
-		side: side, setup: setup, time: k.CloseTime, entry: entry,
+		feats: feats,
+		side:  side, setup: setup, time: k.CloseTime, entry: entry,
 		stop: stop, target: target, stopDist: stopDist, atr: atrVal,
 	}
 	return strategy.StepResult{Proposal: &strategy.Proposal{
@@ -1267,9 +1351,18 @@ func (e *Engine) trackFVGs(k kline.Kline) {
 // price first touches on a retrace — the gap top for a long, the gap bottom
 // for a short — or the midpoint.
 func (e *Engine) detectFVG(side strategy.Side) (level float64, z fvgZone, ok bool) {
+	// A paper-thin gap is candle-boundary noise, not an imbalance: require at
+	// least FVGMinATR × ATR of height (0 = accept any gap).
+	minGap := 0.0
+	if e.cfg.FVGMinATR > 0 && e.lastATRReady {
+		minGap = e.cfg.FVGMinATR * e.lastATR
+	}
 	for i := len(e.fvgs) - 1; i >= 0; i-- {
 		cand := e.fvgs[i]
 		if cand.side != side || e.bar-cand.born >= e.cfg.FVGLookback {
+			continue
+		}
+		if cand.hi-cand.lo < minGap {
 			continue
 		}
 		if e.cfg.FVGMidpoint {
@@ -1300,7 +1393,8 @@ func (e *Engine) Resolve(accept bool) {
 		Price: pe.entry, Stop: pe.stop, Target: pe.target,
 	})
 	e.pos = &position{
-		side: pe.side, setup: pe.setup, entryTime: pe.time, entry: pe.entry,
+		feats: pe.feats,
+		side:  pe.side, setup: pe.setup, entryTime: pe.time, entry: pe.entry,
 		stop: pe.stop, target: pe.target, stopDist: pe.stopDist, trigger: pe.trigger,
 		atrAtEntry: pe.atr, bestLow: pe.entry, bestHigh: pe.entry, maker: pe.maker,
 		remaining: 1,
@@ -1481,7 +1575,7 @@ func (e *Engine) close(exit float64, t time.Time, outcome strategy.Outcome) *str
 		Stop: p.stop, Target: p.target, StopDist: p.stopDist,
 		ExitTime: t, ExitPrice: exit, Outcome: outcome,
 		R: r, ATRAtEntry: p.atrAtEntry, MakerEntry: p.maker,
-		Trigger: p.trigger, BEPArmed: p.beArmed,
+		Trigger: p.trigger, BEPArmed: p.beArmed, Features: p.feats,
 	}
 	e.emit(Event{Type: "exit", Time: e.lastK.OpenTime, Side: sideStr(p.side), Setup: p.setup, Price: exit, R: r, Reason: string(outcome)})
 	e.pos = nil
@@ -1567,7 +1661,7 @@ func (e *Engine) closeScaledAs(exit float64, t time.Time, outcome strategy.Outco
 		Stop: p.stop, Target: p.target, StopDist: p.stopDist,
 		ExitTime: t, ExitPrice: exit, Outcome: outcome,
 		R: p.realizedR + p.remaining*exitR, ATRAtEntry: p.atrAtEntry, MakerEntry: p.maker,
-		Trigger: p.trigger, BEPArmed: p.beArmed,
+		Trigger: p.trigger, BEPArmed: p.beArmed, Features: p.feats,
 	}
 	e.emit(Event{Type: "exit", Time: e.lastK.OpenTime, Side: sideStr(p.side), Setup: p.setup, Price: exit, R: tr.R, Reason: string(outcome)})
 	e.pos = nil

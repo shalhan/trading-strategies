@@ -9,9 +9,12 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"flag"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"time"
 
 	"github.com/shalhan/orderflow-trading-app/internal/backtest"
@@ -57,6 +60,9 @@ type params struct {
 	fvgLookback   int
 	sessions      string
 	sessionBuf    int
+	htfAlign      bool
+	htfHours      int
+	htfPivotN     int
 	rTrail        bool
 	rTrailStart   float64
 	rTrailStep    float64
@@ -91,6 +97,9 @@ func main() {
 	fvgLookback := flag.Int("fvg-lookback", 1, "bars back an unmitigated FVG may have formed and still serve a break (1 = break candle only)")
 	sessions := flag.String("block-sessions", "", "block entries around session opens/closes: comma list of asia,london,us (empty = off)")
 	sessionBuf := flag.Int("session-buf", 30, "session blackout half-width in minutes")
+	htfAlign := flag.Bool("htf-align", false, "skip entries against the higher-timeframe structure trend")
+	htfHours := flag.Int("htf-hours", 24, "higher timeframe length in hours (24 = daily)")
+	htfPivotN := flag.Int("htf-pivot-n", 3, "HTF trend swing strength")
 	rTrail := flag.Bool("r-trail", false, "milestone R-trail, full position (replaces target)")
 	rTrailStart := flag.Float64("r-trail-start", 2, "first R-trail milestone")
 	rTrailStep := flag.Float64("r-trail-step", 1, "R spacing of later milestones")
@@ -113,6 +122,7 @@ func main() {
 	fvgMinATR := flag.Float64("fvg-min-atr", 0, "min FVG size in ATR units (high-impact filter)")
 	bufferTicks := flag.Float64("stop-buffer-ticks", 2, "stop buffer ticks")
 	regimeMA := flag.Int("regime-ma", 0, "only trade when BTC close > its N-bar SMA (0 = off)")
+	dumpFeatures := flag.String("dump-features", "", "write per-trade feature snapshots + labels to this CSV (confidence-model training)")
 	capital := flag.Float64("capital", 10000, "starting capital")
 	risk := flag.Float64("risk", 0.01, "risk per trade")
 	maxConc := flag.Int("max-concurrent", 5, "max concurrent positions")
@@ -129,6 +139,7 @@ func main() {
 		fvgStop: *fvgStop, fvgStopBuf: *fvgStopBuf, luxLen: *luxLen, fvgLookback: *fvgLookback,
 		sessions: *sessions, sessionBuf: *sessionBuf,
 		rTrail: *rTrail, rTrailStart: *rTrailStart, rTrailStep: *rTrailStep, rTrailOff: *rTrailOff,
+		htfAlign: *htfAlign, htfHours: *htfHours, htfPivotN: *htfPivotN,
 		liqSweep: *liqSweep, fvgMinATR: *fvgMinATR,
 		bufferTicks: *bufferTicks, capital: *capital, risk: *risk, maxConcurrent: *maxConc,
 	}
@@ -149,7 +160,15 @@ func main() {
 	// the 2-month period it was entered in. No restarts, no warmup penalty, no
 	// dropped boundary trades — the segments sum to the real continuous total.
 	costs := backtest.Costs{FeeRate: *feeRate, SlipRate: 0.0002, MakerFee: *makerFee}
-	netTrades := costs.Apply(runStructureTrades(all, p, gate))
+	rawTrades := runStructureTrades(all, p, gate)
+	netTrades := costs.Apply(rawTrades)
+	if *dumpFeatures != "" {
+		if err := writeFeatures(*dumpFeatures, rawTrades, netTrades); err != nil {
+			fmt.Printf("dump-features: %v\n", err)
+		} else {
+			fmt.Printf("wrote %d labeled trades to %s\n", len(netTrades), *dumpFeatures)
+		}
+	}
 
 	fmt.Printf("\n=== Walk-forward by period (one continuous run, %d segments) ===\n", *segments)
 	fmt.Printf("fixed config: stop %.1f, conc %d, target %gR, %s\n", *maxStopATR, *maxConc, *targetR, *signals)
@@ -221,6 +240,7 @@ func runStructureTrades(data map[string]series, p params, gate backtest.Gate) []
 			FVGStop: p.fvgStop, FVGStopBufATR: p.fvgStopBuf, LuxLen: p.luxLen, FVGLookback: p.fvgLookback,
 			BlackoutSessions: p.sessions, SessionBufMin: p.sessionBuf,
 			RTrail: p.rTrail, RTrailStart: p.rTrailStart, RTrailStep: p.rTrailStep, RTrailOffset: p.rTrailOff,
+			HTFAlign: p.htfAlign, HTFPeriod: time.Duration(p.htfHours) * time.Hour, HTFPivotN: p.htfPivotN,
 			LiquiditySweep: p.liqSweep, FVGMinATR: p.fvgMinATR,
 		})
 		sd[sym] = backtest.SymbolData{Engine: eng, Klines: s.ks}
@@ -347,4 +367,50 @@ func bounds(all map[string]series) (minT, maxT time.Time) {
 func fail(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(1)
+}
+
+// writeFeatures dumps one CSV row per closed trade: entry-time feature
+// snapshot plus gross/net R labels, for offline confidence-model training.
+func writeFeatures(path string, raw, net []*strategy.Trade) error {
+	keys := map[string]bool{}
+	for _, t := range raw {
+		for k := range t.Features {
+			keys[k] = true
+		}
+	}
+	cols := make([]string, 0, len(keys))
+	for k := range keys {
+		cols = append(cols, k)
+	}
+	sort.Strings(cols)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+
+	header := append([]string{"symbol", "entry_time", "side", "setup"}, cols...)
+	header = append(header, "gross_r", "net_r", "win")
+	if err := w.Write(header); err != nil {
+		return err
+	}
+	for i, t := range raw {
+		row := []string{t.Symbol, t.EntryTime.UTC().Format(time.RFC3339), t.Side.String(), t.Setup}
+		for _, c := range cols {
+			row = append(row, strconv.FormatFloat(t.Features[c], 'g', -1, 64))
+		}
+		nr := net[i].R
+		win := "0"
+		if nr > 0 {
+			win = "1"
+		}
+		row = append(row, strconv.FormatFloat(t.R, 'g', -1, 64), strconv.FormatFloat(nr, 'g', -1, 64), win)
+		if err := w.Write(row); err != nil {
+			return err
+		}
+	}
+	return nil
 }

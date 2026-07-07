@@ -59,6 +59,7 @@ func main() {
 	useFVG := flag.Bool("fvg", true, "FVG limit entries (false = market at break close)")
 	fvgMid := flag.Bool("fvg-mid", true, "limit at the gap midpoint instead of its edge")
 	fvgLookback := flag.Int("fvg-lookback", 5, "bars back an unmitigated FVG may serve a break")
+	fvgMinATR := flag.Float64("fvg-min-atr", 0, "min FVG gap height in ATRs (0 = any gap)")
 	maxStopATR := flag.Float64("max-stop-atr", 3, "skip setups with a stop wider than this many ATRs")
 	minStopPct := flag.Float64("min-stop-pct", 0, "skip setups with a stop tighter than this % of price")
 	targetR := flag.Float64("target-r", 4, "target in R")
@@ -75,7 +76,7 @@ func main() {
 		Engine: structure.Config{
 			PivotN: *pivotN, ATRPeriod: 14, MaxStopATR: *maxStopATR, MinStopFrac: *minStopPct / 100,
 			TargetR: *targetR, Signals: *signals, TrendModel: *trendModel, SwingDevATR: *swingDev,
-			LuxLen: *luxLen, UseFVG: *useFVG, FVGMidpoint: *fvgMid, FVGLookback: *fvgLookback,
+			LuxLen: *luxLen, UseFVG: *useFVG, FVGMidpoint: *fvgMid, FVGLookback: *fvgLookback, FVGMinATR: *fvgMinATR,
 			BlackoutSessions: *sessions, SessionBufMin: *sessionBuf,
 		},
 	}
